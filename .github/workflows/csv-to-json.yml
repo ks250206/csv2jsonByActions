@@ -1,0 +1,106 @@
+name: Convert changed CSV to JSON
+
+on:
+  push:
+    branches: [ main ]  # 必要に応じて変更
+    paths:
+      - 'data/**/*.csv'            # data 配下の CSV が変わった時だけトリガー
+      - 'scripts/csv_to_json.py'
+      - '.github/workflows/csv-to-json.yml'
+
+permissions:
+  contents: write       # GITHUB_TOKEN で push するために必要
+
+jobs:
+  convert_csv_to_json:
+    runs-on: ubuntu-latest
+    if: github.actor != 'github-actions[bot]'  # 無限ループ防止
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 差分取得のため履歴が必要
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies (none for now)
+        run: |
+          python -m pip install --upgrade pip
+
+      - name: Get changed CSV files under data/
+        id: changed
+        shell: bash
+        run: |
+          BEFORE_SHA="${{ github.event.before }}"
+          AFTER_SHA="${{ github.sha }}"
+
+          if [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            echo "Initial commit or unknown before SHA. Using all tracked CSV files under data/."
+            # data/ 以下の CSV をすべて対象（サブディレクトリ含む）
+            git ls-files 'data/*.csv' 'data/**/*.csv' > changed_csvs.txt || true
+          else
+            echo "Diffing $BEFORE_SHA..$AFTER_SHA (only in data/)"
+            # data/ 以下に絞って diff を取り、CSV のみ抽出
+            git diff --name-only "$BEFORE_SHA" "$AFTER_SHA" -- data/ \
+              | grep '\.csv$' > changed_csvs.txt || true
+          fi
+
+          echo "Changed CSV files under data/:"
+          cat changed_csvs.txt || true
+
+          CHANGED_CSVS="$(tr '\n' ' ' < changed_csvs.txt | sed 's/ *$//')"
+          echo "changed_csvs=$CHANGED_CSVS" >> "$GITHUB_OUTPUT"
+
+      - name: Convert CSV -> JSON into output/
+        if: steps.changed.outputs.changed_csvs != ''
+        run: |
+          echo "Converting CSV files: ${{ steps.changed.outputs.changed_csvs }}"
+          mkdir -p output
+          python scripts/csv_to_json.py ${{ steps.changed.outputs.changed_csvs }}
+
+      - name: Show git status after conversion
+        run: git status --short
+
+      - name: Commit and push generated JSON files
+        if: steps.changed.outputs.changed_csvs != ''
+        run: |
+          # 変更がなければ何もしない
+          if git diff --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # 差分 CSV に対応する JSON だけを add する（output/ 以下）
+          json_files=""
+          for csv in ${{ steps.changed.outputs.changed_csvs }}; do
+            # 例: data/file.csv -> output/data/file.json
+            base_without_ext="${csv%.csv}"
+            json="output/${base_without_ext}.json"
+
+            if [ -f "$json" ]; then
+              json_files="$json_files $json"
+            fi
+          done
+
+          if [ -z "$json_files" ]; then
+            echo "No JSON files to add."
+            exit 0
+          fi
+
+          echo "Adding JSON files: $json_files"
+          git add $json_files
+
+          git commit -m "chore: auto-generate JSON from data/*.csv [skip ci]" || {
+            echo "Nothing to commit."
+            exit 0
+          }
+
+          git push
+
