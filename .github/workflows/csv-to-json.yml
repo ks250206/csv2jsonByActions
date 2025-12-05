@@ -31,7 +31,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
 
-      - name: Get changed CSV files under data/
+      - name: Get added/modified CSV files under data/
         id: changed
         shell: bash
         run: |
@@ -43,13 +43,13 @@ jobs:
             # data/ 以下の CSV をすべて対象（サブディレクトリ含む）
             git ls-files 'data/*.csv' 'data/**/*.csv' > changed_csvs.txt || true
           else
-            echo "Diffing $BEFORE_SHA..$AFTER_SHA (only in data/)"
-            # data/ 以下に絞って diff を取り、CSV のみ抽出
-            git diff --name-only "$BEFORE_SHA" "$AFTER_SHA" -- data/ \
+            echo "Diffing $BEFORE_SHA..$AFTER_SHA (added + modified, only in data/)"
+            # data/ 以下に絞って、追加(A)＋変更(M)だけを対象にする
+            git diff --name-only --diff-filter=AM "$BEFORE_SHA" "$AFTER_SHA" -- data/ \
               | grep '\.csv$' > changed_csvs.txt || true
           fi
 
-          echo "Changed CSV files under data/:"
+          echo "Target CSV files under data/:"
           cat changed_csvs.txt || true
 
           CHANGED_CSVS="$(tr '\n' ' ' < changed_csvs.txt | sed 's/ *$//')"
@@ -64,20 +64,14 @@ jobs:
 
       - name: Show git status after conversion
         run: git status --short
-
+      
       - name: Commit and push generated JSON files
         if: steps.changed.outputs.changed_csvs != ''
         run: |
-          # 変更がなければ何もしない
-          if git diff --quiet; then
-            echo "No changes to commit."
-            exit 0
-          fi
-
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # 差分 CSV に対応する JSON だけを add する（output/ 以下）
+          # 対象 CSV に対応する JSON だけを add する（output/ 以下）
           json_files=""
           for csv in ${{ steps.changed.outputs.changed_csvs }}; do
             # 例: data/file.csv -> output/data/file.json
@@ -97,10 +91,15 @@ jobs:
           echo "Adding JSON files: $json_files"
           git add $json_files
 
+          # ここで「ステージ済みのものに差分があるか」を確認
+          if git diff --cached --quiet; then
+            echo "No staged changes, nothing to commit."
+            exit 0
+          fi
+
           git commit -m "chore: auto-generate JSON from data/*.csv [skip ci]" || {
             echo "Nothing to commit."
             exit 0
           }
 
           git push
-
